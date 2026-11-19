@@ -1,5 +1,41 @@
+# Python environments
+venv/
 .venv/
 .venv*/
+.venv39/
+.ryu39/
+.dashboard-venv/
+
+# Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
 .env
+.env.*
+!.env.example
+recovery.token
+*.token
+secrets/
+credentials/
+
+# Runtime data
+logs/
+reports/
+backups/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Local-only operational test
+test_recovery.py
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+.DS_Store

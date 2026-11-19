@@ -35,7 +35,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    CONFIG_FILE.write_text("mode=ok\n", encoding="utf-8")
     server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
     print("Health service listening on port 8080")
     server.serve_forever()
