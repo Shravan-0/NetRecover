@@ -310,14 +310,20 @@ body{font-size:18px;line-height:1.55}button,input,select,textarea{font:inherit}b
      </svg></div><p class="topology-note">Switches and host connections are drawn from the 5-switch, 8-host topology definition.</p>
     </div></section>
    </section>
-   <section class="page" id="page-faults"><div class="page-heading"><div><h2>Fault Injection</h2><p>Enable or disable the seven existing fault types</p></div></div><section class="panel">
+   <section class="page" id="page-faults">
+    <div class="page-heading"><div><h2>Fault Injection</h2><p>Manual fault controls are available below.</p></div></div>
+    <details class="advanced-controls">
+     <summary>Advanced manual controls · Fault Injection</summary>
+     <section class="panel">
       <div class="panel-head"><h2>Fault Injecting</h2><button class="secondary" id="clearAll">Disable All</button></div>
       <div class="panel-body">
         <p class="small" style="margin-top:0"></p>
         <div class="fault-list" id="faultList"></div>
         <p class="footnote">Enable injects a real fault. Disable restores the corresponding service, link, or switch configuration.</p>
       </div>
-    </section></section>
+     </section>
+    </details>
+   </section>
    <section class="page" id="page-logs"><div class="page-heading"><div><h2>Logs</h2><p>Fault history</p></div></div><section class="panel">
       <div class="panel-head"><h2>Real Fault History</h2><span class="kicker">logs/faults.jsonl</span></div>
       <div class="panel-body">
@@ -1049,46 +1055,28 @@ def cancel_config_recovery_watch():
 
 
 def handle_config_fault(action):
-    try:
+    result, code = proxy_mininet(
+        "/api/config",
+        method="POST",
+        payload={"action": action},
+    )
+
+    if code == 200 and result.get("ok"):
         if action == "enable":
-            write_service_config(FAULTY_CONFIG)
             set_config_pipeline(
                 detected=False,
                 recovered=False,
-                detail="Invalid configuration injected. The detector observes it; automatic recovery requires the executor safety gate.",
+                detail="Invalid configuration injected through Mininet control API. Detection and recovery remain under the existing safety gates.",
             )
-            # Injection never launches an independent recovery path.
-            # Automatic execution belongs to the gated detector/executor.
-            return {
-                "ok": True,
-                "id": "config",
-                "state": "fault",
-                "config": read_service_config(),
-                "message": (
-                    "Invalid health-service configuration injected. "
-                    "Automatic recovery requires the executor safety gate; Disable restores manually."
-                ),
-            }, 200
+        else:
+            cancel_config_recovery_watch()
+            set_config_pipeline(
+                detected=_config_pipeline.get("detected", False),
+                recovered=True,
+                detail="Service configuration restored to mode=ok through Mininet control API.",
+            )
 
-        cancel_config_recovery_watch()
-        restore_service_config()
-        set_config_pipeline(
-            detected=_config_pipeline.get("detected", False),
-            recovered=True,
-            detail="Service configuration restored to mode=ok.",
-        )
-        return {
-            "ok": True,
-            "id": "config",
-            "state": "ok",
-            "config": read_service_config(),
-            "message": "Service configuration restored to mode=ok.",
-        }, 200
-    except OSError as exc:
-        return {
-            "ok": False,
-            "error": f"Could not update service configuration: {exc}",
-        }, 500
+    return result, code
 
 
 @app.route("/api/fault", methods=["POST"])
@@ -1129,22 +1117,18 @@ def dashboard_link_status():
 
 @app.route("/api/config/status")
 def dashboard_config_status():
-    try:
-        current = read_service_config()
-        return jsonify({
-            "ok": True,
-            "config": current,
-            "state": "fault" if config_is_faulted() else "ok",
-            "healthy": check_service(),
-            "detected": bool(_config_pipeline.get("detected")),
-            "recovered": bool(_config_pipeline.get("recovered")),
-            "detail": _config_pipeline.get("detail"),
-        })
-    except OSError as exc:
-        return jsonify({
-            "ok": False,
-            "error": f"Could not read service configuration: {exc}",
-        }), 500
+    result, code = proxy_mininet("/api/config/status", timeout=3)
+
+    if code != 200 or not result.get("ok"):
+        return jsonify(result), code
+
+    result.update({
+        "healthy": check_service(),
+        "detected": bool(_config_pipeline.get("detected")),
+        "recovered": bool(_config_pipeline.get("recovered")),
+        "detail": _config_pipeline.get("detail"),
+    })
+    return jsonify(result), 200
 
 
 @app.route("/api/switch/status")
