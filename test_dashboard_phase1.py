@@ -86,22 +86,63 @@ class DashboardPhase1Tests(unittest.TestCase):
         self.assertFalse(dash.check_service())
         self.assertEqual(dash.read_recovery_status()["status"], "UNKNOWN")
 
-    def test_injection_does_not_launch_dashboard_recovery(self):
-        with mock.patch.object(dash, "start_config_recovery_watch") as start:
+    def test_injection_proxies_to_mininet_without_dashboard_recovery(self):
+        upstream = {
+            "ok": True, "id": "config",
+            "state": "fault", "config": "mode=broken"
+        }
+        with mock.patch.object(
+            dash, "proxy_mininet", return_value=(upstream, 200)
+        ) as proxy, mock.patch.object(
+            dash, "start_config_recovery_watch"
+        ) as start:
             response = self.client.post(
                 "/api/fault", json={"action": "enable", "id": "config"}
             )
+
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(dash.SERVICE_CONFIG.read_text().strip(), "mode=broken")
+        proxy.assert_called_once_with(
+            "/api/config", method="POST", payload={"action": "enable"}
+        )
+        self.assertEqual(dash.SERVICE_CONFIG.read_text().strip(), "mode=ok")
         start.assert_not_called()
 
-    def test_manual_disable_still_restores_config(self):
+    def test_manual_disable_proxies_to_mininet(self):
         dash.SERVICE_CONFIG.write_text("mode=broken\n")
-        response = self.client.post(
-            "/api/fault", json={"action": "disable", "id": "config"}
-        )
+        upstream = {
+            "ok": True, "id": "config",
+            "state": "ok", "config": "mode=ok"
+        }
+        with mock.patch.object(
+            dash, "proxy_mininet", return_value=(upstream, 200)
+        ) as proxy:
+            response = self.client.post(
+                "/api/fault", json={"action": "disable", "id": "config"}
+            )
+
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(dash.SERVICE_CONFIG.read_text().strip(), "mode=ok")
+        proxy.assert_called_once_with(
+            "/api/config", method="POST", payload={"action": "disable"}
+        )
+        self.assertEqual(dash.SERVICE_CONFIG.read_text().strip(), "mode=broken")
+        self.assertTrue(dash._config_pipeline["recovered"])
+
+    def test_config_status_is_proxied_to_mininet(self):
+        upstream = {
+            "ok": True, "config": "mode=broken", "state": "fault"
+        }
+        with mock.patch.object(
+            dash, "proxy_mininet", return_value=(upstream, 200)
+        ) as proxy, mock.patch.object(
+            dash, "check_service", return_value=False
+        ):
+            response = self.client.get("/api/config/status")
+
+        self.assertEqual(response.status_code, 200)
+        proxy.assert_called_once_with("/api/config/status", timeout=3)
+        body = response.get_json()
+        self.assertEqual(body["config"], "mode=broken")
+        self.assertEqual(body["state"], "fault")
 
     def test_legacy_watcher_cannot_execute_recovery(self):
         with mock.patch.object(dash, "restore_service_config") as restore:

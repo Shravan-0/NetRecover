@@ -107,6 +107,15 @@ class ControllerManager:
         self.run, self.clock, self.sleep = run, clock, sleep
 
     def _is_expected_command(self, args):
+        # Accept two invocation forms:
+        # 1. Executable form: [python, ryu-manager, --ofp-tcp-listen-port, 6633, app]
+        #    — this is what _spawn() uses (self.argv), and what an operator would launch directly.
+        # 2. Module form: [python, -m, ryu.cmd.manager, app, ...]
+        #    — this is what PID 29875 (the running controller) uses. Both forms launch
+        #    the same Ryu application and must be treated as equivalent to avoid a false
+        #    "no controller found" reading while the real controller is healthy.
+        # args[:4] covers both: for the executable form ryu-manager is at index 1; for the
+        # module form ryu.cmd.manager is at index 2 (python -m ryu.cmd.manager …).
         if args == self.argv:
             return True
         if not args:

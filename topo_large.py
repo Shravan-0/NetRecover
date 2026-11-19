@@ -137,20 +137,23 @@ def parse_control_payload(raw, content_length):
 
 
 def switch_cmd(command):
-    try:
-        args = shlex.split(command)
-        if args and args[0] == "ovs-vsctl":
-            result = subprocess.run(args, capture_output=True, text=True, timeout=4)
-            if result.returncode == 0:
-                return result.stdout.strip()
-    except Exception:
-        pass
-    if network is None:
-        raise RuntimeError("Mininet network is not running")
-    switch = network.get(FAULT_SWITCH)
-    if switch is None:
-        raise RuntimeError(f"Switch {FAULT_SWITCH} was not found")
-    return switch.cmd(command).strip()
+    """Run an ovs-vsctl command via subprocess.run() only.
+
+    topo_large.py runs as root, so subprocess.run(['ovs-vsctl', ...]) always
+    has access to /var/run/openvswitch/db.sock.  No PTY (switch.cmd()) fallback
+    is used here: PTY output can carry stale terminal noise that contaminates
+    observation results.  PTY usage is reserved exclusively for fault-injection
+    write paths (e.g. apply_controller_fault).
+    """
+    args = shlex.split(command)
+    if not args or args[0] != "ovs-vsctl":
+        raise ValueError(f"switch_cmd: only ovs-vsctl commands are supported, got: {command!r}")
+    result = subprocess.run(args, capture_output=True, text=True, timeout=4)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ovs-vsctl failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+    return result.stdout.strip()
 
 
 @observed_network
@@ -221,6 +224,54 @@ def host_cmd(host_name, command):
 def initialize_service_config():
     """Create the healthy default configuration inside Mininet host h2."""
     return host_cmd("h2", "printf 'mode=ok\\n' > /tmp/service.conf")
+
+
+SERVICE_CONFIG = Path("/tmp/service.conf")
+
+
+def set_service_config(mode):
+    """Atomically update the shared health-service configuration."""
+    if mode not in ("ok", "broken"):
+        raise ValueError("Unsupported service configuration mode")
+
+    import tempfile
+
+    fd, temporary = tempfile.mkstemp(
+        prefix=".acn-service-config-",
+        dir=str(SERVICE_CONFIG.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(f"mode={mode}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, SERVICE_CONFIG)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+    return SERVICE_CONFIG.read_text(encoding="utf-8").strip()
+
+
+def service_config_status():
+    try:
+        current = SERVICE_CONFIG.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc), "state": "unknown"}
+
+    if current == "mode=ok":
+        state = "ok"
+    elif current == "mode=broken":
+        state = "fault"
+    else:
+        state = "unknown"
+
+    return {
+        "ok": True,
+        "config": current,
+        "state": state,
+    }
 
 
 # ACN_SERVICE_NAMESPACE_V1
@@ -536,6 +587,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                         "target": "h2:8080",
                     },
                 )
+        elif self.path == "/api/config/status":
+            result = service_config_status()
+            self.send_json(200 if result.get("ok") else 503, result)
         elif self.path == "/api/observe":
             try:
                 self.send_json(200, collect_observations())
@@ -615,6 +669,35 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.send_json(500, {
                     "ok": False,
                     "error": f"Could not change switch configuration: {exc}",
+                })
+            return
+
+        if self.path == "/api/config":
+            action = self.read_action()
+            if action is None:
+                return
+            try:
+                mode = "broken" if action == "enable" else "ok"
+                current = set_service_config(mode)
+                SYSTEM_HEALTH.invalidate()
+                state = "fault" if action == "enable" else "ok"
+                info(f"*** Dashboard config action: service config -> {state}\\n")
+                self.send_json(200, {
+                    "ok": True,
+                    "id": "config",
+                    "config": current,
+                    "state": state,
+                    "message": (
+                        "Service configuration failure enabled"
+                        if action == "enable"
+                        else "Service configuration restored"
+                    ),
+                })
+            except Exception as exc:
+                self.send_json(500, {
+                    "ok": False,
+                    "id": "config",
+                    "error": f"Could not update service configuration: {exc}",
                 })
             return
 
